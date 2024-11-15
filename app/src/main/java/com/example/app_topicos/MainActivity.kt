@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var session: SessionName
     private val TAG = "MainActivity"
     private var showDialog = false
-    private val captureInterval = 3000L // Intervalo de 3 segundos
+    //private val captureInterval = 3000L // Intervalo de 3 segundos
     private var cameraIntent: Intent? = null
     private var isCapturing = false
     private val handler = Handler()
@@ -65,6 +65,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var previewView: PreviewView
     private var isCameraInitialized = false
+
+
+    //
+    private var responseList = mutableListOf<Pair<Double, String>>()
+    private var photoCount = 0
+    private val maxPhotos = 3
+    private val captureInterval = 1000L // Intervalo de 2 segundos
+    private val billetesConBuenaConfianza = mutableListOf<String>()
+    private val umbralConfianza = 50.0 // Puedes ajustar este valor según tus necesidades
+
 
 
 
@@ -109,6 +119,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun guardarBilleteConBuenaConfianza(confianza: Double, valorBillete: String) {
+        if (confianza >= umbralConfianza) {
+            billetesConBuenaConfianza.add(valorBillete)
+            Log.d(TAG, "Billete guardado: $valorBillete con confianza $confianza%")
+        } else {
+            Log.d(TAG, "Billete descartado: $valorBillete con confianza $confianza%")
+        }
+    }
+
+    private fun obtenerUltimoBilleteAnalizado(): String {
+        return if (billetesConBuenaConfianza.isNotEmpty()) {
+            "El último billete analizado es de ${billetesConBuenaConfianza.last()}"
+        } else {
+            "No se ha analizado ningún billete con buena confianza aún."
+        }
+    }
+
+    private fun sumarBilletesAnalizados(): Double {
+        return billetesConBuenaConfianza.sumOf { it.toDoubleOrNull() ?: 0.0 }
+    }
     private fun checkPermissions() {
         val permissionsNeeded = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(
@@ -209,15 +239,38 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "quiero detener la cámara"
                 )
 
-                // Si el usuario dice una frase para activar la cámara
-                if (openCameraCommands.any { spokenText.equals(it, ignoreCase = true) }) {
-                    startCamera()
-                }
-                // Si el usuario dice una frase para detener la cámara
-                else if (closeCameraCommands.any { spokenText.equals(it, ignoreCase = true) }) {
-                    stopCamera()
-                } else {
-                    sendToDialogflow(spokenText)
+
+//                // Si el usuario dice una frase para activar la cámara
+//                if (openCameraCommands.any { spokenText.equals(it, ignoreCase = true) }) {
+//                    Log.e(TAG,"activar camara" )
+//
+//                    //startCamera()
+//                    //testApiConnection()
+//                    startPhotoCaptureSequence()
+//                }
+//                // Si el usuario dice una frase para detener la cámara
+//                else if (closeCameraCommands.any { spokenText.equals(it, ignoreCase = true) }) {
+//                    stopCamera()
+//                } else {
+//                    sendToDialogflow(spokenText)
+//                }
+                when (spokenText.lowercase()) {
+                    "último" -> {
+                        val resultado = obtenerUltimoBilleteAnalizado()
+                        speak(resultado)
+                    }
+                    "suma" -> {
+                        val total = sumarBilletesAnalizados()
+                        val message = "La suma total de los billetes analizados es de ${"%.2f".format(total)} bolivianos"
+                        speak(message)
+
+                    }
+                    "cámara" -> {
+//                        val resultado = obtenerUltimoBilleteAnalizado()
+                        //speak(resultado)
+                        startPhotoCaptureSequence()
+                    }
+                    // Otros comandos aquí
                 }
             }
 
@@ -240,6 +293,34 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         })
         speechRecognizer.startListening(recognizerIntent)
     }
+
+
+    private fun testApiConnection() {
+        val client = OkHttpClient()
+        val request = Request.Builder()
+            .url("https://53fb-181-115-215-42.ngrok-free.app/test")
+            .get()
+            .build()
+
+        // Realizar la solicitud en un hilo separado
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                // En caso de fallo, loguea el error
+                Log.e(TAG, "Error en la solicitud GET: ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                // En caso de éxito, loguea la respuesta
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    Log.d(TAG, "Respuesta de la API: $responseBody")
+                } else {
+                    Log.e(TAG, "Error en la respuesta de la API: ${response.message}")
+                }
+            }
+        })
+    }
+
 
     private fun openCamera() {
         if (ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -383,75 +464,76 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun sendPhotoToApi(photo: Bitmap) {
-        // Convierte el Bitmap a un ByteArrayOutputStream en formato JPEG
-        val outputStream = ByteArrayOutputStream()
-        photo.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
-        val photoData = outputStream.toByteArray()
-        // Verifica el tamaño de los datos de la imagen
-        Log.d("CameraX", "Tamaño de la imagen en bytes: ${photoData.size}")
-        // Guarda la imagen temporalmente para verificar su captura
-        val tempFile = File(cacheDir, "temp_photo.jpg")
-        FileOutputStream(tempFile).use {
-            it.write(photoData)
-            it.flush()
-        }
-        Log.d("CameraX", "Imagen guardada temporalmente en: ${tempFile.absolutePath}")
-        // Crear el cuerpo de la solicitud de la imagen como form-data
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart(
-                "image", "photo.jpg", // Nombre del archivo en la solicitud
-                RequestBody.create("image/jpeg".toMediaTypeOrNull(), photoData)
-            )
-            .build()
-
-        // Crear la solicitud POST con la URL de la API
-        val request = Request.Builder()
-            .url("http://192.168.11.4:5000/predict") // Cambia la URL a la de tu API
-            .post(requestBody)
-            .build()
-
-        // Crear el cliente de OkHttp para enviar la solicitud
-        val client = OkHttpClient()
-
-        // Enviar la solicitud en un hilo separado
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                // Manejo de error
-                Log.e("CameraX", "Error al enviar la imagen: ${e.message}")
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                if (response.isSuccessful) {
-                    val responseBody = response.body?.string()
-                    Log.d("CameraX", "Respuesta de la API: $responseBody")
-
-                    // Parsear el JSON para obtener los valores de `confidence` y `predicted_label`
-                    try {
-                        val jsonObject = JSONObject(responseBody)
-                        val confidence = jsonObject.getDouble("confidence")
-                        val predictedLabel = jsonObject.getString("predicted_label")
-
-                        // Construir el mensaje para speak
-                        val message = "La probabilidad de que sea un billete de $predictedLabel es del ${"%.2f".format(confidence)} por ciento"
-                        speak(message)
-                    } catch (e: JSONException) {
-                        Log.e("CameraX", "Error al parsear la respuesta de la API", e)
-                        speak("Error al interpretar la respuesta de la API")
-                    }
-                } else {
-                    // Manejo de error en la respuesta
-                    Log.e("CameraX", "Error en la respuesta de la API: ${response.message}")
-                    speak("Error en la conexion a la api")
-                }
-            }
-        })
-    }
+//    private fun sendPhotoToApi(photo: Bitmap) {
+//        // Convierte el Bitmap a un ByteArrayOutputStream en formato JPEG
+//        val outputStream = ByteArrayOutputStream()
+//        photo.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
+//        val photoData = outputStream.toByteArray()
+//        // Verifica el tamaño de los datos de la imagen
+//        Log.d("CameraX", "Tamaño de la imagen en bytes: ${photoData.size}")
+//        // Guarda la imagen temporalmente para verificar su captura
+//        val tempFile = File(cacheDir, "temp_photo.jpg")
+//        FileOutputStream(tempFile).use {
+//            it.write(photoData)
+//            it.flush()
+//        }
+//        Log.d("CameraX", "Imagen guardada temporalmente en: ${tempFile.absolutePath}")
+//        // Crear el cuerpo de la solicitud de la imagen como form-data
+//        val requestBody = MultipartBody.Builder()
+//            .setType(MultipartBody.FORM)
+//            .addFormDataPart(
+//                "image", "photo.jpg", // Nombre del archivo en la solicitud
+//                RequestBody.create("image/jpeg".toMediaTypeOrNull(), photoData)
+//            )
+//            .build()
+//
+//        // Crear la solicitud POST con la URL de la API
+//        val request = Request.Builder()
+//            .url("https://53fb-181-115-215-42.ngrok-free.app/predict") // Cambia la URL a la de tu API
+//            .post(requestBody)
+//            .build()
+//
+//        // Crear el cliente de OkHttp para enviar la solicitud
+//        val client = OkHttpClient()
+//
+//        // Enviar la solicitud en un hilo separado
+//        client.newCall(request).enqueue(object : Callback {
+//            override fun onFailure(call: Call, e: IOException) {
+//                // Manejo de error
+//                Log.e("CameraX", "Error al enviar la imagen: ${e.message}")
+//            }
+//
+//            override fun onResponse(call: Call, response: Response) {
+//                if (response.isSuccessful) {
+//                    val responseBody = response.body?.string()
+//                    Log.d("CameraX", "Respuesta de la API: $responseBody")
+//
+//                    // Parsear el JSON para obtener los valores de `confidence` y `predicted_label`
+//                    try {
+//                        val jsonObject = JSONObject(responseBody)
+//                        val confidence = jsonObject.getDouble("confidence")
+//                        val predictedLabel = jsonObject.getString("predicted_label")
+//
+//                        // Construir el mensaje para speak
+//                        val message = "El billete es $predictedLabel confianza de ${"%.2f".format(confidence)} por cien"
+//                        speak(message)
+//                    } catch (e: JSONException) {
+//                        Log.e("CameraX", "Error al parsear la respuesta de la API", e)
+//                        speak("Error al interpretar la respuesta de la API")
+//                    }
+//                } else {
+//                    // Manejo de error en la respuesta
+//                    Log.e("CameraX", "Error en la respuesta de la API: ${response.message}")
+//                    speak("Error en la conexion a la api")
+//                }
+//            }
+//        })
+//    }
     //?---------------------------------------------
     //************************************************************
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        Log.e(TAG, "camacar activa")
 
         cameraProviderFuture.addListener({
             val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
@@ -472,6 +554,38 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         }, ContextCompat.getMainExecutor(this))
     }
+
+    private fun startCamera2() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        Log.e(TAG, "Activando la cámara")
+
+        cameraProviderFuture.addListener({
+            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+            imageCapture = ImageCapture.Builder().build()
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            try {
+                // Desvincula cualquier uso previo de la cámara
+                cameraProvider.unbindAll()
+
+                // Vincula la cámara al ciclo de vida de la actividad
+                cameraProvider.bindToLifecycle(this, cameraSelector, imageCapture)
+                Log.d(TAG, "Cámara inicializada correctamente")
+
+                // Marca la cámara como inicializada
+                isCameraInitialized = true
+
+                // Inicia la captura de fotos solo después de que la cámara esté inicializada
+                captureAndSendPhoto()
+
+            } catch (exc: Exception) {
+                Log.e("CameraX", "Error al inicializar la cámara", exc)
+                isCameraInitialized = false
+            }
+
+        }, ContextCompat.getMainExecutor(this))
+    }
+
     //************************************************************
     private fun stopCamera() {
         if (isCapturing) {
@@ -493,4 +607,98 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         textToSpeech.shutdown()
         speechRecognizer.destroy()
     }
+    //---------------
+
+
+    private fun startPhotoCaptureSequence() {
+        photoCount = 0
+        responseList.clear()
+        speak("mantenga la camara fija por 3 segundos por favor")
+        startCamera2()
+        //captureAndSendPhoto()
+    }
+
+    private fun captureAndSendPhoto() {
+        if (photoCount < maxPhotos) {
+            val photoFile = File(externalMediaDirs.firstOrNull(), "photo.jpg")
+            val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+            imageCapture.takePicture(outputOptions, ContextCompat.getMainExecutor(this),
+                object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                        val bitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
+                        bitmap?.let { sendPhotoToApi(it) }
+                    }
+
+                    override fun onError(exception: ImageCaptureException) {
+                        Log.e(TAG, "Error al capturar la imagen: ${exception.message}", exception)
+                    }
+                })
+        } else {
+            processAndSpeakHighestConfidence()
+            stopCamera()
+        }
+    }
+
+    private fun processAndSpeakHighestConfidence() {
+        if (responseList.isNotEmpty()) {
+            // Encuentra el resultado con la mayor confianza
+            val bestResult = responseList.maxByOrNull { it.first }
+            bestResult?.let {
+                guardarBilleteConBuenaConfianza(it.first, it.second)
+                val message = "billete de ${it.second} con una confianza de ${"%.1f".format(it.first)}% "
+                speak(message) // Usa TextToSpeech para decir el resultado
+
+            }
+        }
+    }
+
+    private fun sendPhotoToApi(photo: Bitmap) {
+        val outputStream = ByteArrayOutputStream()
+        photo.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
+        val photoData = outputStream.toByteArray()
+
+        val requestBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("image", "photo.jpg", RequestBody.create("image/jpeg".toMediaTypeOrNull(), photoData))
+            .build()
+
+        val request = Request.Builder()
+            .url("https://53fb-181-115-215-42.ngrok-free.app/predict") // Cambia la URL a la de tu API
+            .post(requestBody)
+            .build()
+
+        val client = OkHttpClient()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.e(TAG, "Error al enviar la imagen: ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    Log.d(TAG, "Respuesta de la API: $responseBody")
+
+                    try {
+                        val jsonObject = JSONObject(responseBody)
+                        val confidence = jsonObject.getDouble("confidence")
+                        val predictedLabel = jsonObject.getString("predicted_label")
+
+                        // Agrega la respuesta a la lista
+                        responseList.add(Pair(confidence, predictedLabel))
+                        photoCount++ // Incrementa el contador de fotos
+
+                        // Inicia la siguiente captura después de un intervalo
+                        handler.postDelayed({ captureAndSendPhoto() }, captureInterval)
+
+                    } catch (e: JSONException) {
+                        Log.e(TAG, "Error al parsear la respuesta de la API", e)
+                    }
+                } else {
+                    Log.e(TAG, "Error en la respuesta de la API: ${response.message}")
+                }
+            }
+        })
+    }
+
 }
