@@ -28,6 +28,9 @@ import com.google.cloud.dialogflow.v2.*
 import java.util.*
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Handler
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -39,12 +42,20 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.tasks.Task
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import android.content.Context
+import android.os.Looper
+import com.google.android.gms.location.*
+import com.example.app_topicos.AreasConfig
+import com.example.app_topicos.DialogFlowService.UbicacionDato
 
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
@@ -68,20 +79,36 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
 
     //
+    private lateinit var ubicacionActual: Puntos
+    private lateinit var ubucacionDatos: UbicacionDato
+    private var roundedLatitude: String? = null
+    private var roundedLongitude: String? = null
+
+    private var bandera: Boolean = false
+
     private var responseList = mutableListOf<Pair<Double, String>>()
     private var photoCount = 0
     private val maxPhotos = 3
     private val captureInterval = 1000L // Intervalo de 2 segundos
     private val billetesConBuenaConfianza = mutableListOf<String>()
     private val umbralConfianza = 50.0 // Puedes ajustar este valor según tus necesidades
+    //private val urlGro = "https://4c91-110-238-90-20.ngrok-free.app/"
+    private val clientN = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS) // Tiempo para conectar
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)   // Tiempo para escribir
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)    // Tiempo para leer la respuesta
+        .build()
 
 
-
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
 
     companion object {
         private const val PERMISSIONS_REQUEST_CODE = 1
         private const val CAMERA_REQUEST_CODE = 1001 // Puedes usar cualquier número
+        private const val MIN_TIME_BW_UPDATES: Long = 1000 * 60 // 1 minuto
+        private const val MIN_DISTANCE_CHANGE_FOR_UPDATES: Float = 10f // 10 metros
+        private const val PERMISSION_REQUEST_LOCATION = 100
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -97,9 +124,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         initializeShakeService()
         // Inicia CameraX
         //startCamera()
-
         // Ejecutores para manejar hilos de CameraX
         cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // inicializamos el proveedor de gps
+        Log.d(TAG, "Inicializando proveedor de GPS")
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
 
         // Inicia la captura periódica de fotos
         startPeriodicCapture()
@@ -213,6 +244,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun startListening() {
+        var respuesta: String
         speechRecognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 Toast.makeText(this@MainActivity, "Habla ahora", Toast.LENGTH_SHORT).show()
@@ -220,58 +252,62 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val spokenText = matches?.get(0) ?: ""
+                var spokenText = matches?.get(0) ?: ""
                 Log.d(TAG, "Texto reconocido: $spokenText")
-                val openCameraCommands = listOf(
-                    "abrir cámara",
-                    "iniciar cámara",
-                    "quiero la cámara",
-                    "activa la cámara",
-                    "prende la cámara",
-                    "quiero abrir la cámara"
-                )
 
-                val closeCameraCommands = listOf(
-                    "cerrar cámara",
-                    "detener cámara",
-                    "apaga la cámara",
-                    "quiero cerrar la cámara",
-                    "quiero detener la cámara"
-                )
+                if (!bandera){
+                    respuesta = sendToDialogflowBack(spokenText);
+                    when (respuesta.lowercase()) {
+                        "saludo" -> {
 
+                            speak("¡Bienvenido a tu asistente de detección y autenticación de Billetes!\n" +
+                                    "¿Qué deseas hacer hoy? \n" +
+                                    "¿Te gustaría verificar el valor de un billete o comprobar su autenticidad?")
+                        }
+                        "verifica.ultimo" -> {
+                            val resultado = obtenerUltimoBilleteAnalizado()
+                            speak(resultado)
+                        }
+                        "suma.total" -> {
+                            val total = sumarBilletesAnalizados()
+                            val message = "La suma total de los billetes analizados es de ${"%.2f".format(total)} bolivianos"
+                            speak(message)
 
-//                // Si el usuario dice una frase para activar la cámara
-//                if (openCameraCommands.any { spokenText.equals(it, ignoreCase = true) }) {
-//                    Log.e(TAG,"activar camara" )
-//
-//                    //startCamera()
-//                    //testApiConnection()
-//                    startPhotoCaptureSequence()
-//                }
-//                // Si el usuario dice una frase para detener la cámara
-//                else if (closeCameraCommands.any { spokenText.equals(it, ignoreCase = true) }) {
-//                    stopCamera()
-//                } else {
-//                    sendToDialogflow(spokenText)
-//                }
-                when (spokenText.lowercase()) {
-                    "último" -> {
-                        val resultado = obtenerUltimoBilleteAnalizado()
-                        speak(resultado)
-                    }
-                    "suma" -> {
-                        val total = sumarBilletesAnalizados()
-                        val message = "La suma total de los billetes analizados es de ${"%.2f".format(total)} bolivianos"
-                        speak(message)
-
-                    }
-                    "cámara" -> {
+                        }
+                        "verifica.corte" -> {
 //                        val resultado = obtenerUltimoBilleteAnalizado()
-                        //speak(resultado)
-                        startPhotoCaptureSequence()
+                            //speak("")
+                            startPhotoCaptureSequence()
+                        }"ubicacion.actual" -> {
+                        Log.d(TAG, "Proveedor de GPS inicializado")
+                        getLastKnownLocation()
                     }
-                    // Otros comandos aquí
+                        "ubicacion.detalle" -> {
+                            if (!::ubucacionDatos.isInitialized) {
+                                speak("aun no obtuve tu ubicacion actual")
+                            }else{
+                                speak("Donde te encuentras se puede categorizar como ${ubucacionDatos.types}")
+                            }
+                        }
+                        "verificar.operacion" -> {
+                            if (billetesConBuenaConfianza.count()>0){
+                                speak("Que deseas hacer con los billetes analizados?")
+                                bandera = true
+                            }else{
+                                speak("No hay billetes analizados aun")
+                            }
+
+                        }
+//                        "cerrar.app" -> {
+//                            speak("Cerraré la aplicacion")
+//                        }
+                    }
+                }else{
+                    spokenText += "aqui estan los datos de los billetes que tengo por el momento, ${billetesConBuenaConfianza.toString()}"
+                    callChatGPT(spokenText)
+                    bandera = false
                 }
+
             }
 
             override fun onError(error: Int) {
@@ -296,7 +332,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
 
     private fun testApiConnection() {
-        val client = OkHttpClient()
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS) // Tiempo para conectar
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)   // Tiempo para escribir
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)    // Tiempo para leer la respuesta
+            .build()
         val request = Request.Builder()
             .url("https://53fb-181-115-215-42.ngrok-free.app/test")
             .get()
@@ -352,6 +392,29 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             Log.e(TAG, "Error al enviar mensaje a Dialogflow: ${e.message}")
         }
     }
+
+    private fun sendToDialogflowBack(text: String): String{
+        try {
+            val textInput = TextInput.newBuilder().setText(text).setLanguageCode("es").build()
+            val queryInput = QueryInput.newBuilder().setText(textInput).build()
+
+            val request = DetectIntentRequest.newBuilder()
+                .setSession(session.toString())
+                .setQueryInput(queryInput)
+                .build()
+
+            val response = sessionsClient.detectIntent(request)
+            val fulfillmentText = response.queryResult.fulfillmentText
+
+            Log.d(TAG, "Respuesta de Dialogflow: $fulfillmentText")
+//            speak(fulfillmentText)
+            return fulfillmentText;
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al enviar mensaje a Dialogflow: ${e.message}")
+        }
+        return "error";
+    }
+
 
     private fun speak(text: String) {
         textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
@@ -464,71 +527,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-//    private fun sendPhotoToApi(photo: Bitmap) {
-//        // Convierte el Bitmap a un ByteArrayOutputStream en formato JPEG
-//        val outputStream = ByteArrayOutputStream()
-//        photo.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
-//        val photoData = outputStream.toByteArray()
-//        // Verifica el tamaño de los datos de la imagen
-//        Log.d("CameraX", "Tamaño de la imagen en bytes: ${photoData.size}")
-//        // Guarda la imagen temporalmente para verificar su captura
-//        val tempFile = File(cacheDir, "temp_photo.jpg")
-//        FileOutputStream(tempFile).use {
-//            it.write(photoData)
-//            it.flush()
-//        }
-//        Log.d("CameraX", "Imagen guardada temporalmente en: ${tempFile.absolutePath}")
-//        // Crear el cuerpo de la solicitud de la imagen como form-data
-//        val requestBody = MultipartBody.Builder()
-//            .setType(MultipartBody.FORM)
-//            .addFormDataPart(
-//                "image", "photo.jpg", // Nombre del archivo en la solicitud
-//                RequestBody.create("image/jpeg".toMediaTypeOrNull(), photoData)
-//            )
-//            .build()
-//
-//        // Crear la solicitud POST con la URL de la API
-//        val request = Request.Builder()
-//            .url("https://53fb-181-115-215-42.ngrok-free.app/predict") // Cambia la URL a la de tu API
-//            .post(requestBody)
-//            .build()
-//
-//        // Crear el cliente de OkHttp para enviar la solicitud
-//        val client = OkHttpClient()
-//
-//        // Enviar la solicitud en un hilo separado
-//        client.newCall(request).enqueue(object : Callback {
-//            override fun onFailure(call: Call, e: IOException) {
-//                // Manejo de error
-//                Log.e("CameraX", "Error al enviar la imagen: ${e.message}")
-//            }
-//
-//            override fun onResponse(call: Call, response: Response) {
-//                if (response.isSuccessful) {
-//                    val responseBody = response.body?.string()
-//                    Log.d("CameraX", "Respuesta de la API: $responseBody")
-//
-//                    // Parsear el JSON para obtener los valores de `confidence` y `predicted_label`
-//                    try {
-//                        val jsonObject = JSONObject(responseBody)
-//                        val confidence = jsonObject.getDouble("confidence")
-//                        val predictedLabel = jsonObject.getString("predicted_label")
-//
-//                        // Construir el mensaje para speak
-//                        val message = "El billete es $predictedLabel confianza de ${"%.2f".format(confidence)} por cien"
-//                        speak(message)
-//                    } catch (e: JSONException) {
-//                        Log.e("CameraX", "Error al parsear la respuesta de la API", e)
-//                        speak("Error al interpretar la respuesta de la API")
-//                    }
-//                } else {
-//                    // Manejo de error en la respuesta
-//                    Log.e("CameraX", "Error en la respuesta de la API: ${response.message}")
-//                    speak("Error en la conexion a la api")
-//                }
-//            }
-//        })
-//    }
     //?---------------------------------------------
     //************************************************************
     private fun startCamera() {
@@ -664,12 +662,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .build()
 
         val request = Request.Builder()
-            .url("https://53fb-181-115-215-42.ngrok-free.app/predict") // Cambia la URL a la de tu API
+            .url("https://be97-181-115-215-42.ngrok-free.app/predict") // Cambia la URL a la de tu API
             .post(requestBody)
             .build()
 
-        val client = OkHttpClient()
-        client.newCall(request).enqueue(object : Callback {
+        //val client = OkHttpClient()
+        clientN.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 Log.e(TAG, "Error al enviar la imagen: ${e.message}")
             }
@@ -700,5 +698,213 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         })
     }
+
+
+    private fun callChatGPT(prompt: String) {
+
+        val apiKey = "APIChatGPT"
+        val url = "https://api.openai.com/v1/chat/completions"
+        val client = OkHttpClient()
+
+        // Formato ajustado del cuerpo de la solicitud
+        val jsonBody = """
+                                {
+                                    "model": "gpt-4",
+                                    "messages": [
+                                        {
+                                            "role": "user",
+                                            "content": "$prompt"
+                                        }
+                                    ]
+                                }
+                            """.trimIndent()
+
+        val requestBody = RequestBody.create("application/json".toMediaTypeOrNull(), jsonBody)
+        val request = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                //onError(e.message ?: "Error desconocido")
+                Log.e(TAG, "Error desconocido")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    try {
+                        val jsonObject = JSONObject(responseBody ?: "")
+                        val choices = jsonObject.getJSONArray("choices")
+                        val messageContent = choices.getJSONObject(0)
+                            .getJSONObject("message")
+                            .getString("content")
+                            .trim()
+                        Log.d("GPT", messageContent)
+
+                        speak(messageContent)
+                    } catch (e: JSONException) {
+                        //onError("Error al parsear la respuesta de ChatGPT")
+                        Log.e(TAG, "Error al parsear la respuesta de ChatGPT", e)
+                    }
+                } else {
+                    //onError("Error en la solicitud: ${response.message}")
+                    Log.e(TAG, "Error en la solicitud: ${response.message}")
+                }
+            }
+        })
+    }
+
+    private fun getLastKnownLocation() {
+
+
+
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            fusedLocationClient.getCurrentLocation(
+                LocationRequest.PRIORITY_HIGH_ACCURACY,  // Nivel de precisión requerido
+                null // No requiere token de cancelación
+            ).addOnSuccessListener { location ->
+                if (location != null) {
+                    val latitude = location.latitude
+                    val longitude = location.longitude
+                    val roundedLatitude = String.format("%.6f", latitude)
+                    val roundedLongitude = String.format("%.6f", longitude)
+                    Log.d(TAG, "Ubicación obtenida: $roundedLatitude, $roundedLongitude")
+
+                    // Crear el objeto de ubicación
+                    ubicacionActual = Puntos(roundedLatitude.toDouble(), roundedLongitude.toDouble())
+
+                    // Llamar a la API de Google
+                    sendToApiGoogle(ubicacionActual) { ubicacionDato ->
+                        if (ubicacionDato != null) {
+                            // Verificar si está en un área conocida
+                            val areaName = getAreaNameForLocation(ubicacionActual.latitud, ubicacionActual.longitud)
+
+                            if (areaName.isNotEmpty()) {
+                                // Actualizar con el nombre del área conocida
+                                println(areaName)
+                                ubucacionDatos = UbicacionDato(areaName, ubicacionDato.types)
+                                //speak("Tu te encuentras en $areaName")
+                            }else {
+                                ubucacionDatos = ubicacionDato
+                            }
+                            speak("te encuentras en ${ubucacionDatos.longName}")
+                            // Imprimir datos finales
+                            println("Ubicación obtenida y guardada: $ubucacionDatos")
+                        } else {
+                            // Manejo de error al obtener datos de la API
+                            println("No se pudo obtener la ubicación de la API de Google.")
+                            speak("No se pudo determinar tu ubicación.")
+                        }
+                    }
+                } else {
+                    Log.e(TAG, "No se pudo obtener la ubicación del dispositivo.")
+                    Toast.makeText(this, "No se pudo obtener la ubicación", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            requestLocationPermission() // Solicitar permisos si no están otorgados
+        }
+
+    }
+    private fun requestLocationPermission() {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+            PERMISSIONS_REQUEST_CODE
+        )
+    }
+
+
+    fun getAreaNameForLocation(latitude: Double, longitude: Double): String {
+        for (area in AreasConfig.areas) {
+            if (isPointInsideArea(latitude, longitude, area.puntos)) {
+                return area.name // Devuelve el nombre del área si el punto está dentro
+            }
+        }
+        return "" // Devuelve vacío si no coincide con ninguna área
+    }
+
+    fun isPointInsideArea(lat: Double, lng: Double, points: List<Pair<Double, Double>>): Boolean {
+        // Asegúrate de que hay exactamente 4 puntos
+        if (points.size != 4) return false
+
+        // Extrae los puntos
+        val (p1, p2, p3, p4) = points
+
+        // Comprueba si el punto está dentro del área
+        val minLat = listOf(p1.first, p2.first, p3.first, p4.first).minOrNull() ?: return false
+        val maxLat = listOf(p1.first, p2.first, p3.first, p4.first).maxOrNull() ?: return false
+        val minLng = listOf(p1.second, p2.second, p3.second, p4.second).minOrNull() ?: return false
+        val maxLng = listOf(p1.second, p2.second, p3.second, p4.second).maxOrNull() ?: return false
+
+        return lat in minLat..maxLat && lng in minLng..maxLng
+    }
+
+    fun sendToApiGoogle(ubicacion: Puntos, callback: (UbicacionDato?) -> Unit) {
+        val apiGeoGoogle = "APIGeoGoogle"
+        val urlGeo = "https://maps.googleapis.com/maps/api/geocode/json?latlng=${ubicacion.latitud},${ubicacion.longitud}&key=$apiGeoGoogle"
+
+        val client = OkHttpClient()
+
+        val request = Request.Builder()
+            .url(urlGeo)
+            .get()
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                println("Error en la solicitud: ${e.message}")
+                callback(null) // Devolvemos un resultado nulo en caso de error
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    response.body?.let { responseBody ->
+                        try {
+                            val responseData = responseBody.string()
+                            val jsonObject = JSONObject(responseData)
+                            val results = jsonObject.getJSONArray("results")
+
+                            // Extraer datos directamente
+                            val firstResult = results.getJSONObject(0)
+                            val placeId = firstResult.getString("place_id")
+
+                            val typesArray = firstResult.getJSONArray("types")
+                            val typesList = mutableListOf<String>()
+                            for (i in 0 until typesArray.length()) {
+                                typesList.add(typesArray.getString(i))
+                            }
+
+                            val addressComponent = firstResult.getJSONArray("address_components").getJSONObject(0)
+                            val longName = addressComponent.getString("long_name")
+
+                            val translatedTypes = Translations.translateTypes(typesList)
+
+
+                            callback(UbicacionDato(longName, translatedTypes))
+                        } catch (e: Exception) {
+                            println("Error al procesar la respuesta: ${e.message}")
+                            callback(null) // En caso de error al procesar JSON, devolvemos nulo
+                        }
+                    } ?: run {
+                        println("El cuerpo de la respuesta es nulo")
+                        callback(null)
+                    }
+                } else {
+                    println("Error en la respuesta: Código ${response.code}")
+                    callback(null)
+                }
+            }
+        })
+    }
+
+
 
 }
